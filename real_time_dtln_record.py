@@ -27,7 +27,9 @@ This code is licensed under the terms of the MIT-license.
 
 
 import numpy as np
+import queue
 import sounddevice as sd
+import soundfile as sf
 import tflite_runtime.interpreter as tflite
 import argparse
 
@@ -53,29 +55,28 @@ parser = argparse.ArgumentParser(
     formatter_class=argparse.RawDescriptionHelpFormatter,
     parents=[parser])
 parser.add_argument(
-    '-i', '--input-device', type=int_or_str,
+    'filename', nargs='?', metavar='FILENAME',
+    help='audio file to store recording to')
+parser.add_argument(
+    '-d', '--device', type=int_or_str,
     help='input device (numeric ID or substring)')
 parser.add_argument(
-    '-o', '--output-device', type=int_or_str,
-    help='output device (numeric ID or substring)')
+    '-t', '--subtype', type=str, help='sound file subtype (e.g. "PCM_24")')
 parser.add_argument(
-    '-n', '--no-denoise', action='store_true',
-    help='turn off denoise, pass-through')
-parser.add_argument(
-    '-t', '--threads', type=int, default=1,
-    help='number of threads for tflite interpreters')
-
-parser.add_argument('--latency', type=float, help='latency in seconds', default=0.2)
+    '-o', '--original', type=str, help='record a noise version at the same time')
 args = parser.parse_args(remaining)
+
+q = queue.Queue()
+oq = queue.Queue()
 
 # set some parameters
 block_len_ms = 32 
 block_shift_ms = 8
 fs_target = 16000
 # create the interpreters
-interpreter_1 = tflite.Interpreter(model_path='./pretrained_model/model_quant_1.tflite', num_threads=args.threads)
+interpreter_1 = tflite.Interpreter(model_path='./pretrained_model/model_quant_1.tflite')
 interpreter_1.allocate_tensors()
-interpreter_2 = tflite.Interpreter(model_path='./pretrained_model/model_quant_2.tflite', num_threads=args.threads)
+interpreter_2 = tflite.Interpreter(model_path='./pretrained_model/model_quant_2.tflite')
 interpreter_2.allocate_tensors()
 # Get input and output tensors.
 input_details_1 = interpreter_1.get_input_details()
@@ -93,15 +94,13 @@ in_buffer = np.zeros((block_len)).astype('float32')
 out_buffer = np.zeros((block_len)).astype('float32')
 
 
-def callback(indata, outdata, frames, time, status):
+def callback(indata, frames, time, status):
+    if args.original:
+        oq.put(indata.copy())
     # buffer and states to global
     global in_buffer, out_buffer, states_1, states_2
     if status:
         print(status)
-    indata = indata[:, [0]] 
-    if args.no_denoise:
-        outdata[:] = indata
-        return
     # write to buffer
     in_buffer[:-block_shift] = in_buffer[block_shift:]
     in_buffer[-block_shift:] = np.squeeze(indata)
@@ -137,20 +136,31 @@ def callback(indata, outdata, frames, time, status):
     out_buffer[-block_shift:] = np.zeros((block_shift))
     out_buffer  += np.squeeze(out_block)
     # output to soundcard
-    outdata[:] = np.expand_dims(out_buffer[:block_shift], axis=-1)
+    outdata = np.expand_dims(out_buffer[:block_shift], axis=-1)
+    q.put(outdata)
     
 
-
 try:
-    with sd.Stream(device=(args.input_device, args.output_device),
-                   samplerate=fs_target, blocksize=block_shift,
-                   dtype=np.float32, latency=args.latency,
-                   channels=(6, 1), callback=callback):
-        print('#' * 80)
-        print('press Return to quit')
-        print('#' * 80)
-        input()
+    with sf.SoundFile(args.filename, mode='x', samplerate=fs_target,
+                      channels=1, subtype=args.subtype) as file:
+        if args.original:
+            ofile = sf.SoundFile(args.original, mode='x', samplerate=fs_target,
+                      channels=1, subtype=args.subtype)
+        with sd.InputStream(device=args.device,
+                    samplerate=fs_target, blocksize=block_shift,
+                    dtype=np.float32, channels=1, callback=callback):
+            print('#' * 80)
+            print('press Return to quit')
+            print('#' * 80)
+            while True:
+                file.write(q.get())
+                if args.original:
+                    ofile.write(oq.get())
+                
 except KeyboardInterrupt:
+    print('\nRecording finished: ' + repr(args.filename))
+    if args.original:
+        print('Recording without DTLN: ' + repr(args.original))
     parser.exit('')
 except Exception as e:
     parser.exit(type(e).__name__ + ': ' + str(e))

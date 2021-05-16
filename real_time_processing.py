@@ -21,7 +21,7 @@ block_shift = 128
 model = tf.saved_model.load('./pretrained_model/dtln_saved_model')
 infer = model.signatures["serving_default"]
 # load audio file at 16k fs (please change)
-audio,fs = sf.read('path_to_your_favorite_audio.wav')
+audio,fs = sf.read('rec.wav')
 # check for sampling rate
 if fs != 16000:
     raise ValueError('This model only supports 16k sampling rate.')
